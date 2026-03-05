@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Lightweight Questrade auto-trader with hard risk limits.
+"""Questrade auto-trader with approval gate.
 
-Configured for small-account experiments:
-- starting capital reference: 100 USD
-- max trades per run/day: 3
-- max notional per trade: 20 USD
-
-This script is designed to run once per trading day (e.g., via GitHub Actions cron).
+Modes:
+- plan: generate trade plan with reasons, no orders.
+- execute: place orders only when both TRADE_ENABLED=true and confirmation is YES.
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime as dt
 import json
 import math
@@ -28,11 +26,11 @@ class Config:
     refresh_token: str
     account_id: str
     is_demo: bool
-    max_trades_per_day: int = 3
-    max_notional_per_trade: float = 20.0
-    daily_loss_limit: float = 5.0
-    trade_enabled: bool = False
-    symbol_universe: List[str] = None
+    trade_enabled: bool
+    max_trades_per_day: int
+    max_notional_per_trade: float
+    daily_loss_limit: float
+    symbol_universe: List[str]
 
 
 class QuestradeClient:
@@ -67,12 +65,6 @@ class QuestradeClient:
             raise RuntimeError("Not authenticated")
         return {"Authorization": f"Bearer {self.access_token}"}
 
-    def get_accounts(self) -> dict:
-        return self._http_json("GET", f"{self.api_server}v1/accounts", headers=self.auth_headers())
-
-    def get_positions(self, account_id: str) -> dict:
-        return self._http_json("GET", f"{self.api_server}v1/accounts/{account_id}/positions", headers=self.auth_headers())
-
     def get_balances(self, account_id: str) -> dict:
         return self._http_json("GET", f"{self.api_server}v1/accounts/{account_id}/balances", headers=self.auth_headers())
 
@@ -85,7 +77,6 @@ class QuestradeClient:
         return self._http_json("GET", f"{self.api_server}v1/markets/quotes/{sid}", headers=self.auth_headers())
 
     def place_market_order(self, account_id: str, symbol_id: int, qty: int, side: str) -> dict:
-        # Questrade accepts this endpoint with market order shape per API docs.
         payload = {
             "orderType": "Market",
             "action": side,
@@ -106,7 +97,6 @@ class QuestradeClient:
 
 
 def fetch_stooq_close(symbol: str) -> Optional[List[float]]:
-    # Stooq format prefers lowercase and .us suffix for US symbols.
     stooq_symbol = symbol.lower() + ".us"
     url = f"https://stooq.com/q/d/l/?s={urllib.parse.quote_plus(stooq_symbol)}&i=d"
     try:
@@ -116,6 +106,7 @@ def fetch_stooq_close(symbol: str) -> Optional[List[float]]:
     lines = [ln.strip() for ln in csv_data.splitlines() if ln.strip()]
     if len(lines) < 22:
         return None
+
     closes = []
     for ln in lines[1:]:
         cols = ln.split(",")
@@ -129,7 +120,6 @@ def fetch_stooq_close(symbol: str) -> Optional[List[float]]:
 
 
 def momentum_score(closes: List[float]) -> float:
-    # 20-day momentum.
     return (closes[-1] / closes[0]) - 1.0
 
 
@@ -149,7 +139,6 @@ def build_config() -> Config:
 
     universe = os.getenv(
         "TRADE_UNIVERSE",
-        # Tech + broad + bitcoin-related ETF/stock proxies.
         "AAPL,MSFT,NVDA,AMD,META,PLTR,SOFI,SPY,QQQ,BITO,MSTR,COIN",
     ).split(",")
 
@@ -157,121 +146,151 @@ def build_config() -> Config:
         refresh_token=refresh,
         account_id=account_id,
         is_demo=os.getenv("QUESTRADE_IS_DEMO", "false").lower() == "true",
+        trade_enabled=os.getenv("TRADE_ENABLED", "false").lower() == "true",
         max_trades_per_day=int(os.getenv("MAX_TRADES_PER_DAY", "3")),
         max_notional_per_trade=float(os.getenv("MAX_NOTIONAL_PER_TRADE", "20")),
         daily_loss_limit=float(os.getenv("DAILY_LOSS_LIMIT", "5")),
-        trade_enabled=os.getenv("TRADE_ENABLED", "false").lower() == "true",
         symbol_universe=[s.strip().upper() for s in universe if s.strip()],
     )
 
 
-def select_candidates(universe: List[str]) -> List[str]:
+def select_candidates(cfg: Config) -> List[dict]:
     scored = []
-    for sym in universe:
+    for sym in cfg.symbol_universe:
         closes = fetch_stooq_close(sym)
         if not closes:
             continue
         score = momentum_score(closes)
-        last_price = closes[-1]
-        scored.append((sym, score, last_price))
+        last_close = closes[-1]
+        scored.append({"symbol": sym, "score": score, "last_close": last_close})
 
-    # Keep positive momentum only, sorted strongest first.
-    winners = [row for row in scored if row[1] > 0]
-    winners.sort(key=lambda x: x[1], reverse=True)
-
-    # Because max order is 20 USD and no fractional shares, only pick symbols we can buy.
-    affordable = [sym for sym, _score, px in winners if px <= 20.0]
-    return affordable[:3]
+    winners = [x for x in scored if x["score"] > 0]
+    winners.sort(key=lambda x: x["score"], reverse=True)
+    return winners
 
 
-def run() -> int:
-    cfg = build_config()
-    today = dt.datetime.now().strftime("%Y-%m-%d")
-
-    client = QuestradeClient(cfg.refresh_token, cfg.is_demo)
-    client.authenticate()
-
+def build_plan(cfg: Config, client: QuestradeClient) -> dict:
     balances = client.get_balances(cfg.account_id)
     cash = extract_cash_usd(balances)
+    winners = select_candidates(cfg)
 
-    if cash <= 0:
-        print("No USD cash available; no trades placed.")
-        return 0
+    if not winners:
+        return {
+            "date": dt.datetime.now().strftime("%Y-%m-%d"),
+            "mode": "plan",
+            "cash_usd": round(cash, 2),
+            "orders": [],
+            "sell_plan": "No sells today (long-only entry model).",
+            "summary": "No positive 20-day momentum symbols found.",
+        }
 
-    candidates = select_candidates(cfg.symbol_universe)
-    if not candidates:
-        print("No affordable positive-momentum symbols found; no trades placed.")
-        return 0
+    symbols = [w["symbol"] for w in winners[: min(len(winners), 12)]]
+    symbol_lookup = client.lookup_symbols(symbols).get("symbols", [])
+    by_symbol = {x.get("symbol"): x for x in symbol_lookup}
 
-    symbol_map = client.lookup_symbols(candidates)
-    symbols = symbol_map.get("symbols", [])
-    by_symbol = {s.get("symbol"): s for s in symbols}
-
-    trades_done = 0
-    spent = 0.0
-    report_rows = []
-
-    for sym in candidates:
-        if trades_done >= cfg.max_trades_per_day:
-            break
-
-        entry = by_symbol.get(sym)
-        if not entry:
+    order_candidates = []
+    for w in winners:
+        sym = w["symbol"]
+        row = by_symbol.get(sym)
+        if not row:
             continue
-
-        symbol_id = int(entry["symbolId"])
-
-        quotes = client.get_quotes([symbol_id]).get("quotes", [])
+        sid = int(row["symbolId"])
+        quotes = client.get_quotes([sid]).get("quotes", [])
         if not quotes:
             continue
         ask = float(quotes[0].get("askPrice") or quotes[0].get("lastTradePrice") or 0)
         if ask <= 0:
             continue
 
-        budget = min(cfg.max_notional_per_trade, cash - spent)
-        qty = math.floor(budget / ask)
+        qty = math.floor(cfg.max_notional_per_trade / ask)
         if qty < 1:
             continue
 
         notional = qty * ask
-        if notional > cfg.max_notional_per_trade + 1e-9:
-            continue
-
-        if not cfg.trade_enabled:
-            order_resp = {"status": "skipped", "reason": "TRADE_ENABLED is false"}
-        else:
-            order_resp = client.place_market_order(cfg.account_id, symbol_id, qty, "Buy")
-        spent += notional
-        trades_done += 1
-        report_rows.append(
+        reason = (
+            f"20-day momentum is positive ({w['score']*100:.2f}%), "
+            f"price is affordable for risk cap (${cfg.max_notional_per_trade:.2f}/trade)."
+        )
+        order_candidates.append(
             {
-                "date": today,
                 "symbol": sym,
+                "symbol_id": sid,
+                "side": "Buy",
                 "qty": qty,
-                "est_price": round(ask, 4),
+                "ask": round(ask, 4),
                 "est_notional": round(notional, 2),
-                "order_response": order_resp,
+                "reason": reason,
+                "momentum_20d_pct": round(w["score"] * 100, 2),
             }
         )
 
-    out = {
-        "date": today,
-        "cash_before": round(cash, 2),
-        "spent_estimate": round(spent, 2),
-        "trades_done": trades_done,
-        "max_trades_per_day": cfg.max_trades_per_day,
-        "max_notional_per_trade": cfg.max_notional_per_trade,
-        "universe": cfg.symbol_universe,
-        "filled": report_rows,
+        if len(order_candidates) >= cfg.max_trades_per_day:
+            break
+
+    if cash > 0:
+        running = 0.0
+        filtered = []
+        for o in order_candidates:
+            if running + o["est_notional"] <= cash + 1e-9:
+                filtered.append(o)
+                running += o["est_notional"]
+        order_candidates = filtered
+
+    summary = (
+        f"Prepared {len(order_candidates)} buy order(s), max {cfg.max_trades_per_day}/day, "
+        f"max ${cfg.max_notional_per_trade:.2f} each."
+    )
+
+    return {
+        "date": dt.datetime.now().strftime("%Y-%m-%d"),
+        "mode": "plan",
+        "cash_usd": round(cash, 2),
+        "orders": order_candidates,
+        "sell_plan": "No sells today (long-only entry model).",
+        "summary": summary,
     }
 
+
+def execute_plan(cfg: Config, client: QuestradeClient, plan: dict, confirm_text: str) -> dict:
+    if confirm_text.strip().upper() != "YES":
+        return {"status": "blocked", "reason": "Confirmation text must be YES", "executed": []}
+
+    if not cfg.trade_enabled:
+        return {"status": "blocked", "reason": "TRADE_ENABLED is false", "executed": []}
+
+    executed = []
+    for o in plan.get("orders", [])[: cfg.max_trades_per_day]:
+        resp = client.place_market_order(cfg.account_id, int(o["symbol_id"]), int(o["qty"]), "Buy")
+        executed.append({"symbol": o["symbol"], "qty": o["qty"], "response": resp})
+
+    return {"status": "ok", "executed": executed}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["plan", "execute"], default="plan")
+    parser.add_argument("--confirm", default=os.getenv("CONFIRM_TRADE", ""))
+    args = parser.parse_args()
+
+    cfg = build_config()
+    client = QuestradeClient(cfg.refresh_token, cfg.is_demo)
+    client.authenticate()
+
+    plan = build_plan(cfg, client)
+
+    if args.mode == "plan":
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 0
+
+    result = execute_plan(cfg, client, plan, args.confirm)
+    out = {"plan": plan, "execution": result}
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(run())
+        raise SystemExit(main())
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise
