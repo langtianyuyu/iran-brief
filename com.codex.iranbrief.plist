@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex.iranbrief</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>/Users/apple/Documents/codexproject/run_daily_iran_brief.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>19</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/apple/Documents/codexproject</string>
+  <key>StandardOutPath</key>
+  <string>/Users/apple/Documents/codexproject/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/apple/Documents/codexproject/logs/launchd.err.log</string>
+</dict>
+</plist>
