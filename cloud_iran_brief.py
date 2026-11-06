@@ -122,7 +122,10 @@ def fetch_markets():
         pass
 
     en = f"{spx_line} | {btc_line}"
-    zh = translate_text(en, "zh-CN")
+    try:
+        zh = translate_text(en, "zh-CN")
+    except Exception:
+        zh = en
     return {"en": en, "zh": zh}
 
 
@@ -156,12 +159,18 @@ def render_email(date_str, paired):
         f"<li><b>EN:</b> {html.escape(b['en'])}<br/><b>中文:</b> {html.escape(b['zh'])}</li>"
         for b in paired
     )
+    source_map = {source['id']: source for item in paired for source in item.get('sources', [])}
+    source_links = ''.join(
+        f'<li>[{html.escape(sid)}] <a href="{html.escape(source["url"], quote=True)}">{html.escape(source["url"])}</a></li>'
+        for sid, source in source_map.items()
+        if urllib.parse.urlparse(source['url']).scheme in ('http', 'https')
+    )
     links = "".join(
         f'<li><a href="{html.escape(b["link"], quote=True)}">{html.escape(b["link"])}</a></li>'
         for b in paired if urllib.parse.urlparse(b.get('link', '')).scheme in ('http', 'https')
     )
     return (f"<h3>Iran News &amp; Markets Brief / 伊朗资讯与市场简报 ({html.escape(date_str)})</h3>"
-            f"<ul>{bullets}</ul><p>Sources / 来源:</p><ul>{links}</ul>"
+            f"<ul>{bullets}</ul><p>Sources / 来源:</p><ul>{source_links}{links}</ul>"
             "<p>Automatically collected headlines and translations; sources are not independently verified."
             " / 自动采集与翻译，内容未经独立核实。</p>")
 
@@ -170,7 +179,10 @@ def main():
     parser = argparse.ArgumentParser(description='Bilingual news digest')
     parser.add_argument('--preview', metavar='HTML_PATH', help='Save HTML without sending email')
     parser.add_argument('--fixture', metavar='JSON_PATH', help='Offline paired items; requires --preview')
+    parser.add_argument('--ai', action='store_true', help='Opt in to model-generated summaries of feed snippets')
     args = parser.parse_args()
+    if args.fixture and args.ai:
+        parser.error('--fixture contains paired display items; run tests/test_ai.py for offline AI checks')
     if args.fixture and not args.preview:
         parser.error('--fixture requires --preview')
     if args.fixture:
@@ -208,6 +220,17 @@ def main():
                 "link": "",
             }
         ]
+
+    if args.ai:
+        from ai_brief import summarize_news
+        ai_result = summarize_news(news)
+        if ai_result['status'] == 'ok':
+            paired = ai_result['items']
+            paired[0]['sources'] = ai_result['sources']
+        else:
+            paired.insert(0, {'en': 'AI summary unavailable or insufficient; showing rule-based feed items.',
+                              'zh': 'AI摘要不可用或证据不足，以下为规则筛选的原始条目。', 'link': ''})
+        print('AI summary status: ' + ai_result['status'])
 
     paired.append({**fetch_markets(), "link": ""})
 
