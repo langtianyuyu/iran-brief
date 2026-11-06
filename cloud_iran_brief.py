@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import argparse
+from pathlib import Path
 import datetime as dt
 import html
 import json
@@ -148,7 +150,34 @@ def send(subject: str, html_body: str):
     )
 
 
+def render_email(date_str, paired):
+    """Escape external text and allow only HTTP(S) source links."""
+    bullets = "".join(
+        f"<li><b>EN:</b> {html.escape(b['en'])}<br/><b>中文:</b> {html.escape(b['zh'])}</li>"
+        for b in paired
+    )
+    links = "".join(
+        f'<li><a href="{html.escape(b["link"], quote=True)}">{html.escape(b["link"])}</a></li>'
+        for b in paired if urllib.parse.urlparse(b.get('link', '')).scheme in ('http', 'https')
+    )
+    return (f"<h3>Iran News &amp; Markets Brief / 伊朗资讯与市场简报 ({html.escape(date_str)})</h3>"
+            f"<ul>{bullets}</ul><p>Sources / 来源:</p><ul>{links}</ul>"
+            "<p>Automatically collected headlines and translations; sources are not independently verified."
+            " / 自动采集与翻译，内容未经独立核实。</p>")
+
+
 def main():
+    parser = argparse.ArgumentParser(description='Bilingual news digest')
+    parser.add_argument('--preview', metavar='HTML_PATH', help='Save HTML without sending email')
+    parser.add_argument('--fixture', metavar='JSON_PATH', help='Offline paired items; requires --preview')
+    args = parser.parse_args()
+    if args.fixture and not args.preview:
+        parser.error('--fixture requires --preview')
+    if args.fixture:
+        paired = json.loads(Path(args.fixture).read_text(encoding='utf-8'))
+        Path(args.preview).write_text(render_email('DEMO — synthetic fixture', paired), encoding='utf-8')
+        return
+
     tz = os.getenv("TZ", "America/Los_Angeles")
     os.environ["TZ"] = tz
     try:
@@ -174,27 +203,20 @@ def main():
     if not paired:
         paired = [
             {
-                "en": "No reliable numeric war updates found in reachable sources in the last 24h.",
-                "zh": "过去24小时可访问来源中未抓到可靠的数字型战况更新。",
+                "en": "No matching numeric news items retrieved. Sources may be unavailable or filtered out.",
+                "zh": "未获取到符合数字筛选条件的新闻；可能是来源不可用或条目被过滤。",
                 "link": "",
             }
         ]
 
     paired.append({**fetch_markets(), "link": ""})
 
-    bullets = "".join(
-        f"<li><b>EN:</b> {b['en']}<br/><b>中文:</b> {b['zh']}</li>" for b in paired
-    )
-    links = "".join(
-        f'<li><a href="{b["link"]}">{b["link"]}</a></li>' for b in paired if b["link"]
-    )
-
-    subject = f"[Iran War Brief | 伊朗战况] {date_str}"
-    body = (
-        f"<h3>Iran War + Markets Brief / 伊朗战况与市场简报 ({date_str})</h3>"
-        f"<ul>{bullets}</ul>"
-        f"<p>Sources / 来源:</p><ul>{links}</ul>"
-    )
+    body = render_email(date_str, paired)
+    subject = f"[Iran News Brief | 伊朗资讯] {date_str}"
+    if args.preview:
+        Path(args.preview).write_text(body, encoding='utf-8')
+        print(f"Preview saved to {args.preview}")
+        return
     print(send(subject, body))
 
 

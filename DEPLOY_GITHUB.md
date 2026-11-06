@@ -1,13 +1,11 @@
-1. Create a GitHub repo and push this folder.
-2. In GitHub repo settings, add Actions secrets:
-   - RESEND_API_KEY = your Resend key
-   - MAIL_TO = langtianyuyu@gmail.com
-   - MAIL_FROM = onboarding@resend.dev
-3. Enable GitHub Actions for the repo.
-4. Run workflow once manually: Actions -> "Daily Iran Brief" -> Run workflow.
-5. After that, it runs daily at 06:00 (Los Angeles time target via UTC cron).
+# Deploy the briefing workflow
 
-Notes:
-- This runs in GitHub cloud, so your Mac can stay off.
-- Internet is required in GitHub runner (already provided by Actions).
-- If you want a different timezone, update TZ and cron in .github/workflows/iran-brief.yml.
+1. Push the reviewed project to your repository.
+2. Add Actions secrets: `RESEND_API_KEY`, `MAIL_TO`, `MAIL_FROM`.
+3. Enable Actions and open **Daily Iran Brief**.
+4. Manually dispatch once if you intend to send a real email; inspect the job and mailbox for success.
+5. The workflow is scheduled for **14:00 UTC daily**. `TZ=America/Edmonton` changes script date formatting, not cron scheduling.
+
+14:00 UTC is 07:00 Edmonton standard time / 08:00 daylight time. Scheduled jobs may start late. No delivery or continuous-operation guarantee has been established.
+
+For a no-send preview, use the README's `--preview` command locally. The legacy macOS launcher contains absolute paths for another checkout and needs configuration before use.
